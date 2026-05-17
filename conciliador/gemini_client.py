@@ -115,6 +115,18 @@ def _extrair(pdf_bytes: bytes, prompt: str) -> DadosTitulo:
         log.warning("Resposta Gemini nao-JSON: %s", texto[:200])
         return DadosTitulo(linha_digitavel=None, raw=texto)
 
+    # Gemini as vezes envelopa o objeto em uma lista, mesmo pedindo objeto unico.
+    if isinstance(data, list):
+        if not data:
+            return DadosTitulo(linha_digitavel=None, raw=texto)
+        if len(data) > 1:
+            log.warning("Gemini retornou %d itens; usando o primeiro.", len(data))
+        data = data[0]
+
+    if not isinstance(data, dict):
+        log.warning("Resposta Gemini com tipo inesperado (%s): %s", type(data).__name__, texto[:200])
+        return DadosTitulo(linha_digitavel=None, raw=texto)
+
     return DadosTitulo(
         linha_digitavel=data.get("linha_digitavel"),
         valor=data.get("valor"),
