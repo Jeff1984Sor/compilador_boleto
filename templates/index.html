@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<title>Conciliador de Boletos</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header>
+  <h1>Conciliador de Boletos</h1>
+  <p class="sub">Casa boletos com seus comprovantes pela linha digitavel e gera 1 PDF (boleto + comprovante) por boleto.</p>
+</header>
+
+<main>
+  <!-- ETAPA 1: upload -->
+  <section id="passo-upload" class="card">
+    <h2>1. Enviar arquivos</h2>
+    <form id="form-upload">
+      <div class="campo">
+        <label for="comprovantes"><strong>PDF unico</strong> com varios comprovantes (1 por pagina)</label>
+        <input type="file" id="comprovantes" name="comprovantes" accept="application/pdf" required>
+      </div>
+      <div class="campo">
+        <label for="boletos"><strong>Boletos</strong> (selecione varios PDFs)</label>
+        <input type="file" id="boletos" name="boletos" accept="application/pdf" multiple required>
+        <small id="contagem-boletos" class="hint"></small>
+      </div>
+      <button type="submit" id="btn-processar">Processar</button>
+    </form>
+  </section>
+
+  <!-- ETAPA 2: processando -->
+  <section id="passo-processando" class="card hidden">
+    <h2>Processando...</h2>
+    <div class="spinner"></div>
+    <p>Lendo os PDFs com IA (Gemini) e casando as linhas digitaveis. Pode levar alguns segundos por arquivo.</p>
+  </section>
+
+  <!-- ETAPA 3: revisao -->
+  <section id="passo-revisao" class="card hidden">
+    <div class="header-revisao">
+      <h2>2. Revisar resultado</h2>
+      <div class="actions">
+        <button id="btn-voltar" type="button" class="btn-secundario">Voltar</button>
+        <button id="btn-baixar" type="button">Baixar ZIP</button>
+      </div>
+    </div>
+    <div id="resumo" class="resumo"></div>
+    <div class="tabela-wrap">
+      <table id="tabela-resultado">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Arquivo de saida</th>
+            <th>Status</th>
+            <th>Valor</th>
+            <th>Vencimento</th>
+            <th>Pag. comprovante</th>
+            <th>Acao</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p id="orfaos" class="hint"></p>
+  </section>
+
+  <!-- ETAPA 4: erro -->
+  <section id="passo-erro" class="card hidden">
+    <h2>Erro</h2>
+    <p id="msg-erro"></p>
+    <button id="btn-tentar-novo" type="button">Tentar novamente</button>
+  </section>
+</main>
+
+<!-- Modal de preview -->
+<div id="modal-preview" class="modal hidden">
+  <div class="modal-content">
+    <div class="modal-header">
+      <span id="modal-titulo"></span>
+      <button id="modal-fechar" type="button" aria-label="Fechar">x</button>
+    </div>
+    <iframe id="modal-iframe" title="Preview do PDF"></iframe>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

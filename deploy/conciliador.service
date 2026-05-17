@@ -1,0 +1,18 @@
+[Unit]
+Description=Conciliador de Boletos (Flask + Gunicorn)
+After=network.target
+
+[Service]
+# Ajuste WorkingDirectory, User e caminhos conforme seu setup
+WorkingDirectory=/opt/conciliador_boleto
+EnvironmentFile=/opt/conciliador_boleto/.env
+ExecStart=/opt/conciliador_boleto/.venv/bin/gunicorn -w 2 -k gthread --threads 4 -t 180 -b 0.0.0.0:9000 app:app
+Restart=always
+RestartSec=5
+User=www-data
+Group=www-data
+# Permite escrever em /tmp/conciliador_sessions
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target
