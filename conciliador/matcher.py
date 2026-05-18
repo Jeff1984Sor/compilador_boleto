@@ -1,13 +1,21 @@
-"""Logica de conciliacao: casa boletos com comprovantes e gera arquivos resultantes."""
+"""Logica de conciliacao: casa boletos com comprovantes em 3 rounds.
+
+Round 1: linha digitavel (alta confianca)
+Round 2: valor + beneficiario similar (media confianca)
+Round 3: somente valor, casa apenas se candidato unico (baixa confianca)
+"""
 
 from __future__ import annotations
 
 import io
 import logging
 import os
+import re
+import unicodedata
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional
 
@@ -15,25 +23,38 @@ from . import gemini_client, pdf_utils
 
 log = logging.getLogger(__name__)
 
+# Limite de similaridade do nome no round 2
+_SIMILARIDADE_MIN = 0.6
+
+# Palavras descartadas ao comparar nomes de empresas (alta variabilidade entre boleto e comprovante)
+_STOPWORDS_EMPRESA = {
+    "LTDA", "LIMITADA", "ME", "EPP", "EIRELI", "MEI",
+    "SA", "S/A", "S.A", "S.A.",
+    "SOCIEDADE", "EMPRESARIAL",
+    "DE", "DA", "DO", "DAS", "DOS", "E",
+}
+
 
 @dataclass
 class ResultadoBoleto:
-    nome_arquivo: str           # nome final no ZIP (igual ao nome do boleto enviado)
-    boleto_origem: str          # nome original do upload
+    nome_arquivo: str                       # nome final no ZIP
+    boleto_origem: str                      # nome original do upload
     casado: bool
     chave: Optional[str] = None
     linha_digitavel: Optional[str] = None
     valor_boleto: Optional[str] = None
     vencimento: Optional[str] = None
-    comprovante_pagina: Optional[int] = None  # 1-indexed, se casou
-    pdf_relativo: Optional[str] = None        # caminho relativo no diretorio da sessao
+    beneficiario: Optional[str] = None
+    comprovante_pagina: Optional[int] = None     # 1-indexed
+    pdf_relativo: Optional[str] = None
     erro: Optional[str] = None
+    casamento_metodo: Optional[str] = None       # "linha_digitavel" | "valor_beneficiario" | "valor"
 
 
 @dataclass
 class ResultadoConciliacao:
     boletos: list[ResultadoBoleto] = field(default_factory=list)
-    comprovantes_orfaos: list[int] = field(default_factory=list)  # paginas sem match
+    comprovantes_orfaos: list[int] = field(default_factory=list)
     total_comprovantes: int = 0
 
     @property
@@ -54,113 +75,218 @@ class ResultadoConciliacao:
         }
 
 
+# ---------- helpers de normalizacao ----------
+
+def _normalizar_valor(valor: Optional[str]) -> Optional[int]:
+    """Converte uma string monetaria em centavos (int). Aceita 'R$ 1.234,56', '1234.56', etc."""
+    if not valor:
+        return None
+    s = re.sub(r"[^\d,.\-]", "", str(valor))
+    if not s:
+        return None
+    # Detecta formato BR (1.234,56) vs US (1,234.56)
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        s = s.replace(",", ".")
+    try:
+        return int(round(float(s) * 100))
+    except (ValueError, OverflowError):
+        return None
+
+
+def _normalizar_nome(nome: Optional[str]) -> str:
+    """Uppercase, sem acentos, sem pontuacao, sem stopwords e tokens curtos."""
+    if not nome:
+        return ""
+    s = nome.upper()
+    s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    s = re.sub(r"[^\w\s]", " ", s)
+    tokens = [t for t in s.split() if len(t) > 1 and t not in _STOPWORDS_EMPRESA]
+    return " ".join(tokens)
+
+
+def _similaridade_nomes(a: Optional[str], b: Optional[str]) -> float:
+    """Similaridade 0..1 combinando Jaccard de tokens + SequenceMatcher."""
+    na, nb = _normalizar_nome(a), _normalizar_nome(b)
+    if not na or not nb:
+        return 0.0
+    tokens_a, tokens_b = set(na.split()), set(nb.split())
+    jaccard = len(tokens_a & tokens_b) / len(tokens_a | tokens_b) if tokens_a and tokens_b else 0.0
+    seq = SequenceMatcher(None, na, nb).ratio()
+    return max(jaccard, seq)
+
+
 def _processar_paralelo(items: list, func, max_workers: int = 6):
-    """Executa func em paralelo sobre items (preservando ordem dos resultados)."""
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         return list(ex.map(func, items))
 
+
+def _sanitizar_nome_pdf(nome: str) -> str:
+    base = os.path.basename(nome).strip()
+    if not base.lower().endswith(".pdf"):
+        base += ".pdf"
+    return base.replace("\\", "_").replace("/", "_")
+
+
+# ---------- pipeline principal ----------
 
 def conciliar(
     comprovantes_pdf: bytes,
     boletos: list[tuple[str, bytes]],
     sessao_dir: Path,
 ) -> ResultadoConciliacao:
-    """
-    Processa comprovantes + boletos e grava os PDFs resultantes em `sessao_dir`.
-
-    Args:
-        comprovantes_pdf: PDF unico contendo todos os comprovantes (1 por pagina).
-        boletos: lista de (nome_arquivo, bytes) — 1 boleto por arquivo.
-        sessao_dir: diretorio onde os PDFs resultantes serao gravados.
-
-    Returns:
-        ResultadoConciliacao com status de cada boleto.
-    """
+    """Roda 3 rounds de casamento e grava os PDFs resultantes em `sessao_dir`."""
     sessao_dir.mkdir(parents=True, exist_ok=True)
     pasta_sem = sessao_dir / "sem_comprovante"
 
     log.info("Iniciando conciliacao: %d boletos", len(boletos))
 
-    # 1. Divide comprovantes por pagina
+    # 1. Split de comprovantes
     paginas_comprovantes = pdf_utils.split_por_pagina(comprovantes_pdf)
     log.info("Comprovantes: %d paginas detectadas", len(paginas_comprovantes))
 
-    # 2. Extrai linha digitavel de cada comprovante (em paralelo)
-    dados_comprovantes = _processar_paralelo(
-        paginas_comprovantes,
-        gemini_client.extrair_dados_comprovante,
-    )
+    # 2. Extracao em paralelo
+    dados_comprovantes = _processar_paralelo(paginas_comprovantes, gemini_client.extrair_dados_comprovante)
+    dados_boletos = _processar_paralelo([b[1] for b in boletos], gemini_client.extrair_dados_boleto)
 
-    # Indice: chave -> (indice_pagina, pdf_bytes)
-    indice_comprovantes: dict[str, tuple[int, bytes]] = {}
-    paginas_sem_chave: list[int] = []
-    for idx, dados in enumerate(dados_comprovantes):
-        chave = dados.chave
-        if chave:
-            # se a mesma chave aparecer 2x, prevalece a primeira ocorrencia
-            indice_comprovantes.setdefault(chave, (idx, paginas_comprovantes[idx]))
-        else:
-            paginas_sem_chave.append(idx + 1)
-            log.warning("Comprovante pagina %d: nao foi possivel extrair linha digitavel", idx + 1)
-
-    # 3. Extrai linha digitavel de cada boleto (em paralelo)
-    dados_boletos = _processar_paralelo(
-        [b[1] for b in boletos],
-        gemini_client.extrair_dados_boleto,
-    )
-
-    # 4. Casa e gera PDF resultante
+    # 3. Inicializa resultado
     resultado = ResultadoConciliacao(total_comprovantes=len(paginas_comprovantes))
-    usados: set[str] = set()
-
-    for (nome, boleto_bytes), dados in zip(boletos, dados_boletos):
-        nome_final = _sanitizar_nome_pdf(nome)
-        chave = dados.chave
-        r = ResultadoBoleto(
-            nome_arquivo=nome_final,
+    for (nome, _), dados in zip(boletos, dados_boletos):
+        resultado.boletos.append(ResultadoBoleto(
+            nome_arquivo=_sanitizar_nome_pdf(nome),
             boleto_origem=nome,
             casado=False,
-            chave=chave,
+            chave=dados.chave,
             linha_digitavel=dados.linha_digitavel,
             valor_boleto=dados.valor,
             vencimento=dados.vencimento,
-        )
+            beneficiario=dados.beneficiario,
+        ))
 
-        if chave and chave in indice_comprovantes and chave not in usados:
-            idx_pag, comp_bytes = indice_comprovantes[chave]
-            usados.add(chave)
-            pdf_merged = pdf_utils.merge_pdfs([boleto_bytes, comp_bytes])
-            dest = sessao_dir / nome_final
-            dest.write_bytes(pdf_merged)
+    paginas_usadas: set[int] = set()
+    boleto_para_pagina: dict[int, int] = {}
+
+    # ---------- ROUND 1: linha digitavel ----------
+    indice_chave: dict[str, int] = {}
+    for idx, d in enumerate(dados_comprovantes):
+        if d.chave:
+            indice_chave.setdefault(d.chave, idx)
+
+    for i, r in enumerate(resultado.boletos):
+        db = dados_boletos[i]
+        if not db.chave or db.chave not in indice_chave:
+            continue
+        idx_pag = indice_chave[db.chave]
+        if idx_pag in paginas_usadas:
+            continue
+        r.casado = True
+        r.comprovante_pagina = idx_pag + 1
+        r.casamento_metodo = "linha_digitavel"
+        paginas_usadas.add(idx_pag)
+        boleto_para_pagina[i] = idx_pag
+
+    log.info("Round 1 (linha digitavel): %d casados", sum(1 for r in resultado.boletos if r.casado))
+
+    # ---------- ROUND 2: valor + beneficiario ----------
+    for i, r in enumerate(resultado.boletos):
+        if r.casado:
+            continue
+        db = dados_boletos[i]
+        valor_boleto = _normalizar_valor(db.valor)
+        if valor_boleto is None:
+            continue
+
+        candidatos: list[tuple[int, float]] = []
+        for idx_pag in range(len(paginas_comprovantes)):
+            if idx_pag in paginas_usadas:
+                continue
+            dc = dados_comprovantes[idx_pag]
+            if _normalizar_valor(dc.valor) != valor_boleto:
+                continue
+            sim = _similaridade_nomes(db.beneficiario, dc.beneficiario)
+            if sim >= _SIMILARIDADE_MIN:
+                candidatos.append((idx_pag, sim))
+
+        if candidatos:
+            candidatos.sort(key=lambda x: x[1], reverse=True)
+            idx_pag, _ = candidatos[0]
             r.casado = True
             r.comprovante_pagina = idx_pag + 1
-            r.pdf_relativo = nome_final
+            r.casamento_metodo = "valor_beneficiario"
+            paginas_usadas.add(idx_pag)
+            boleto_para_pagina[i] = idx_pag
+
+    log.info("Apos Round 2 (valor+nome): %d casados", sum(1 for r in resultado.boletos if r.casado))
+
+    # ---------- ROUND 3: somente valor (apenas se candidato unico) ----------
+    for i, r in enumerate(resultado.boletos):
+        if r.casado:
+            continue
+        db = dados_boletos[i]
+        valor_boleto = _normalizar_valor(db.valor)
+        if valor_boleto is None:
+            continue
+
+        candidatos = [
+            idx_pag for idx_pag in range(len(paginas_comprovantes))
+            if idx_pag not in paginas_usadas
+            and _normalizar_valor(dados_comprovantes[idx_pag].valor) == valor_boleto
+        ]
+
+        if len(candidatos) == 1:
+            idx_pag = candidatos[0]
+            r.casado = True
+            r.comprovante_pagina = idx_pag + 1
+            r.casamento_metodo = "valor"
+            paginas_usadas.add(idx_pag)
+            boleto_para_pagina[i] = idx_pag
+        elif len(candidatos) > 1:
+            r.erro = f"Ambiguo: {len(candidatos)} comprovantes com valor R$ {db.valor or '?'} (paginas {[c+1 for c in candidatos]})"
+
+    log.info("Apos Round 3 (so valor): %d casados", sum(1 for r in resultado.boletos if r.casado))
+
+    # ---------- Grava PDFs e finaliza relatorio ----------
+    for i, r in enumerate(resultado.boletos):
+        nome, boleto_bytes = boletos[i]
+        if r.casado:
+            idx_pag = boleto_para_pagina[i]
+            pdf_merged = pdf_utils.merge_pdfs([boleto_bytes, paginas_comprovantes[idx_pag]])
+            dest = sessao_dir / r.nome_arquivo
+            dest.write_bytes(pdf_merged)
+            r.pdf_relativo = r.nome_arquivo
         else:
-            # Sem comprovante: copia o boleto sozinho para pasta separada
             pasta_sem.mkdir(parents=True, exist_ok=True)
-            dest = pasta_sem / nome_final
+            dest = pasta_sem / r.nome_arquivo
             dest.write_bytes(boleto_bytes)
-            r.pdf_relativo = f"sem_comprovante/{nome_final}"
-            if not chave:
-                r.erro = "Nao foi possivel ler a linha digitavel do boleto"
-            else:
-                r.erro = "Nenhum comprovante com essa linha digitavel"
+            r.pdf_relativo = f"sem_comprovante/{r.nome_arquivo}"
+            if not r.erro:
+                if not dados_boletos[i].chave and _normalizar_valor(dados_boletos[i].valor) is None:
+                    r.erro = "Nao foi possivel ler dados do boleto (linha digitavel e valor)"
+                else:
+                    r.erro = "Nenhum comprovante correspondente encontrado"
 
-        resultado.boletos.append(r)
-
-    # Comprovantes que ninguem usou (paginas)
-    orfaos = []
-    for chave, (idx, _) in indice_comprovantes.items():
-        if chave not in usados:
-            orfaos.append(idx + 1)
-    resultado.comprovantes_orfaos = sorted(orfaos + paginas_sem_chave)
+    resultado.comprovantes_orfaos = sorted(
+        i + 1 for i in range(len(paginas_comprovantes)) if i not in paginas_usadas
+    )
 
     log.info("Conciliacao concluida: %d/%d casados", resultado.casados, resultado.total_boletos)
     return resultado
 
 
+# ---------- relatorio e ZIP ----------
+
+_NOMES_METODO = {
+    "linha_digitavel": "linha digitavel",
+    "valor_beneficiario": "valor + nome",
+    "valor": "so valor",
+}
+
+
 def montar_zip(sessao_dir: Path, resultado: ResultadoConciliacao) -> bytes:
-    """Empacota tudo da sessao em um ZIP em memoria."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for boleto in resultado.boletos:
@@ -169,35 +295,32 @@ def montar_zip(sessao_dir: Path, resultado: ResultadoConciliacao) -> bytes:
             caminho = sessao_dir / boleto.pdf_relativo
             if caminho.exists():
                 zf.write(caminho, arcname=boleto.pdf_relativo)
-        # Relatorio
         zf.writestr("_conciliacao.txt", _gerar_relatorio(resultado))
     return buf.getvalue()
 
 
 def _gerar_relatorio(r: ResultadoConciliacao) -> str:
+    por_metodo: dict[str, int] = {}
+    for b in r.boletos:
+        if b.casado and b.casamento_metodo:
+            por_metodo[b.casamento_metodo] = por_metodo.get(b.casamento_metodo, 0) + 1
+
     linhas = [
         "=== Relatorio de Conciliacao ===",
         f"Total de boletos: {r.total_boletos}",
         f"Total de comprovantes (paginas): {r.total_comprovantes}",
         f"Boletos casados: {r.casados}",
-        f"Boletos sem comprovante: {r.total_boletos - r.casados}",
-        f"Comprovantes orfaos (paginas): {r.comprovantes_orfaos or 'nenhum'}",
-        "",
-        "--- Detalhe por boleto ---",
     ]
+    for m, n in por_metodo.items():
+        linhas.append(f"  - {_NOMES_METODO.get(m, m)}: {n}")
+    linhas.append(f"Boletos sem comprovante: {r.total_boletos - r.casados}")
+    linhas.append(f"Comprovantes orfaos (paginas): {r.comprovantes_orfaos or 'nenhum'}")
+    linhas.append("")
+    linhas.append("--- Detalhe por boleto ---")
     for b in r.boletos:
         status = "OK" if b.casado else "SEM COMPROVANTE"
-        extra = f" (pag.{b.comprovante_pagina})" if b.comprovante_pagina else ""
-        erro = f" — {b.erro}" if b.erro else ""
-        linhas.append(f"[{status}] {b.nome_arquivo}{extra}{erro}")
+        metodo = f" via {_NOMES_METODO.get(b.casamento_metodo, b.casamento_metodo)}" if b.casamento_metodo else ""
+        pag = f" pag.{b.comprovante_pagina}" if b.comprovante_pagina else ""
+        erro = f" - {b.erro}" if b.erro else ""
+        linhas.append(f"[{status}]{pag}{metodo} {b.nome_arquivo}{erro}")
     return "\n".join(linhas) + "\n"
-
-
-def _sanitizar_nome_pdf(nome: str) -> str:
-    """Garante que o nome termina com .pdf e remove path traversal."""
-    base = os.path.basename(nome).strip()
-    if not base.lower().endswith(".pdf"):
-        base += ".pdf"
-    # remove caracteres perigosos para sistema de arquivos
-    base = base.replace("\\", "_").replace("/", "_")
-    return base
