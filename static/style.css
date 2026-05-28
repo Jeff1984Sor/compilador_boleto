@@ -120,6 +120,7 @@ button:disabled { background: #9ca3af; cursor: not-allowed; }
 .resumo .pill.metodo-1 { background: #dbeafe; border-color: #bfdbfe; color: #1e3a8a; }
 .resumo .pill.metodo-2 { background: #fef3c7; border-color: #fde68a; color: #78350f; }
 .resumo .pill.metodo-3 { background: #ffedd5; border-color: #fed7aa; color: #7c2d12; }
+.resumo .pill.metodo-4 { background: #fce7f3; border-color: #fbcfe8; color: #831843; }
 
 .badge {
   display: inline-block;
@@ -132,6 +133,7 @@ button:disabled { background: #9ca3af; cursor: not-allowed; }
 .badge.metodo-1 { background: #dbeafe; color: #1e3a8a; }
 .badge.metodo-2 { background: #fef3c7; color: #78350f; }
 .badge.metodo-3 { background: #ffedd5; color: #7c2d12; }
+.badge.metodo-4 { background: #fce7f3; color: #831843; }
 
 .tabela-wrap { overflow-x: auto; }
 table {

@@ -249,6 +249,42 @@ def conciliar(
 
     log.info("Apos Round 3 (so valor): %d casados", sum(1 for r in resultado.boletos if r.casado))
 
+    # ---------- ROUND 4: pareamento de duplicatas ----------
+    # Caso comum: 2 boletos com mesmo valor+pagador e 2 comprovantes PIX correspondentes.
+    # Round 2/3 acima nao casam corretamente porque ha multiplos candidatos identicos.
+    # Aqui: para cada valor onde sobraram N boletos sem match e N comprovantes orfaos
+    # (mesma quantidade), parear na ordem em que foram enviados. Nao chama Gemini.
+    boletos_restantes_por_valor: dict[int, list[int]] = {}
+    for i, r in enumerate(resultado.boletos):
+        if r.casado:
+            continue
+        v = _normalizar_valor(dados_boletos[i].valor)
+        if v is not None:
+            boletos_restantes_por_valor.setdefault(v, []).append(i)
+
+    comprovantes_restantes_por_valor: dict[int, list[int]] = {}
+    for idx_pag in range(len(paginas_comprovantes)):
+        if idx_pag in paginas_usadas:
+            continue
+        v = _normalizar_valor(dados_comprovantes[idx_pag].valor)
+        if v is not None:
+            comprovantes_restantes_por_valor.setdefault(v, []).append(idx_pag)
+
+    for valor_cent, idxs_boletos in boletos_restantes_por_valor.items():
+        idxs_comprovantes = comprovantes_restantes_por_valor.get(valor_cent, [])
+        if len(idxs_boletos) >= 2 and len(idxs_boletos) == len(idxs_comprovantes):
+            for idx_b, idx_p in zip(idxs_boletos, idxs_comprovantes):
+                r = resultado.boletos[idx_b]
+                r.casado = True
+                r.comprovante_pagina = idx_p + 1
+                r.casamento_metodo = "pares_duplicados"
+                r.erro = None  # limpa a marcacao "ambiguo" deixada pelo round 3
+                paginas_usadas.add(idx_p)
+                boleto_para_pagina[idx_b] = idx_p
+            log.info("Round 4: pareou %d duplicatas com valor %d centavos", len(idxs_boletos), valor_cent)
+
+    log.info("Apos Round 4 (pares duplicados): %d casados", sum(1 for r in resultado.boletos if r.casado))
+
     # ---------- Grava PDFs e finaliza relatorio ----------
     for i, r in enumerate(resultado.boletos):
         nome, boleto_bytes = boletos[i]
@@ -283,6 +319,7 @@ _NOMES_METODO = {
     "linha_digitavel": "linha digitavel",
     "valor_beneficiario": "valor + nome",
     "valor": "so valor",
+    "pares_duplicados": "pares duplicados",
 }
 
 

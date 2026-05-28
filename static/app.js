@@ -62,7 +62,7 @@
 
   function renderizarResultado(data) {
     // Contagem por metodo
-    const porMetodo = { linha_digitavel: 0, valor_beneficiario: 0, valor: 0 };
+    const porMetodo = { linha_digitavel: 0, valor_beneficiario: 0, valor: 0, pares_duplicados: 0 };
     data.boletos.forEach((b) => {
       if (b.casado && b.casamento_metodo) porMetodo[b.casamento_metodo] = (porMetodo[b.casamento_metodo] || 0) + 1;
     });
@@ -78,6 +78,7 @@
       ${porMetodo.linha_digitavel ? `<span class="pill metodo-1">Linha digitavel: <strong>${porMetodo.linha_digitavel}</strong></span>` : ""}
       ${porMetodo.valor_beneficiario ? `<span class="pill metodo-2">Valor + nome: <strong>${porMetodo.valor_beneficiario}</strong></span>` : ""}
       ${porMetodo.valor ? `<span class="pill metodo-3">So valor: <strong>${porMetodo.valor}</strong></span>` : ""}
+      ${porMetodo.pares_duplicados ? `<span class="pill metodo-4">Pares duplicados: <strong>${porMetodo.pares_duplicados}</strong></span>` : ""}
     `;
 
     // Tabela
@@ -157,6 +158,7 @@
       linha_digitavel: { label: "linha digitavel", cls: "metodo-1" },
       valor_beneficiario: { label: "valor + nome", cls: "metodo-2" },
       valor: { label: "so valor", cls: "metodo-3" },
+      pares_duplicados: { label: "pares duplicados", cls: "metodo-4" },
     };
     const m = mapa[metodo];
     if (!m) return "-";
