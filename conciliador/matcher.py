@@ -19,7 +19,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional
 
-from . import gemini_client, pdf_utils
+from . import openai_client as ai_client
+from . import pdf_utils
 
 log = logging.getLogger(__name__)
 
@@ -150,8 +151,8 @@ def conciliar(
     log.info("Comprovantes: %d paginas detectadas", len(paginas_comprovantes))
 
     # 2. Extracao em paralelo
-    dados_comprovantes = _processar_paralelo(paginas_comprovantes, gemini_client.extrair_dados_comprovante)
-    dados_boletos = _processar_paralelo([b[1] for b in boletos], gemini_client.extrair_dados_boleto)
+    dados_comprovantes = _processar_paralelo(paginas_comprovantes, ai_client.extrair_dados_comprovante)
+    dados_boletos = _processar_paralelo([b[1] for b in boletos], ai_client.extrair_dados_boleto)
 
     # 3. Inicializa resultado
     resultado = ResultadoConciliacao(total_comprovantes=len(paginas_comprovantes))

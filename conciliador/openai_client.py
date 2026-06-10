@@ -1,7 +1,12 @@
-"""Cliente Gemini: extrai linha digitavel/codigo de barras de PDFs de boletos e comprovantes."""
+"""Cliente OpenAI: extrai linha digitavel/codigo de barras de PDFs.
+
+Como a OpenAI Chat Completions nao aceita PDF como input, convertemos cada
+pagina do PDF em imagem PNG via PyMuPDF antes de enviar.
+"""
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -9,8 +14,8 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from google import genai
-from google.genai import types
+import pymupdf
+from openai import OpenAI
 
 log = logging.getLogger(__name__)
 
@@ -28,25 +33,21 @@ class DadosTitulo:
 
     @property
     def chave(self) -> Optional[str]:
-        """Linha digitavel normalizada (so digitos) — usada como chave de match."""
+        """Linha digitavel normalizada (so digitos) - usada como chave de match."""
         if not self.linha_digitavel:
             return None
         digitos = "".join(_LINHA_DIGITAVEL_RE.findall(self.linha_digitavel))
-        # Linha digitavel tem 47 (boleto bancario) ou 48 (arrecadacao) digitos
-        if len(digitos) in (47, 48):
-            return digitos
-        # Codigo de barras (44 digitos) tambem serve como chave
-        if len(digitos) == 44:
+        if len(digitos) in (47, 48, 44):
             return digitos
         return digitos if digitos else None
 
 
 _PROMPT_BOLETO = """\
-Voce esta lendo um BOLETO BANCARIO brasileiro em PDF.
+Voce esta lendo um BOLETO BANCARIO brasileiro.
 Extraia os campos abaixo e devolva APENAS um JSON valido (sem markdown, sem texto antes ou depois).
 
 Campos:
-- linha_digitavel: a linha digitavel completa do boleto (47 ou 48 digitos, pode vir formatada com pontos e espacos — devolva EXATAMENTE como aparece)
+- linha_digitavel: a linha digitavel completa do boleto (47 ou 48 digitos, pode vir formatada com pontos e espacos - devolva EXATAMENTE como aparece)
 - valor: valor do documento (ex.: "1.234,56")
 - vencimento: data de vencimento no formato dd/mm/aaaa
 - beneficiario: nome do beneficiario / cedente
@@ -58,38 +59,52 @@ Exemplo de saida:
 """
 
 _PROMPT_COMPROVANTE = """\
-Voce esta lendo um COMPROVANTE DE PAGAMENTO de boleto bancario brasileiro em PDF (1 pagina).
+Voce esta lendo um COMPROVANTE DE PAGAMENTO brasileiro (boleto bancario OU PIX).
 Extraia os campos abaixo e devolva APENAS um JSON valido (sem markdown, sem texto antes ou depois).
 
 Campos:
-- linha_digitavel: a linha digitavel do boleto pago (47 ou 48 digitos — devolva EXATAMENTE como aparece, com pontuacao se houver). Se so houver codigo de barras (44 digitos), retorne ele.
+- linha_digitavel: linha digitavel do boleto pago (47/48 digitos). Se for PIX ou nao tiver linha digitavel visivel, use null.
 - valor: valor pago (ex.: "1.234,56")
 - vencimento: data de vencimento ou pagamento (dd/mm/aaaa)
-- beneficiario: nome do beneficiario / favorecido
+- beneficiario: nome do beneficiario / favorecido (quem recebeu)
 
 Se algum campo nao for encontrado, use null.
 
 Exemplo de saida:
-{"linha_digitavel": "23793390016000000000000000000011234567890123456", "valor": "1.234,56", "vencimento": "15/06/2026", "beneficiario": "EMPRESA XYZ LTDA"}
+{"linha_digitavel": null, "valor": "1.234,56", "vencimento": "15/06/2026", "beneficiario": "EMPRESA XYZ LTDA"}
 """
 
 
-def _client() -> genai.Client:
-    api_key = os.environ.get("GEMINI_API_KEY")
+def _client() -> OpenAI:
+    api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY nao definida no ambiente (.env)")
-    return genai.Client(api_key=api_key)
+        raise RuntimeError("OPENAI_API_KEY nao definida no ambiente (.env)")
+    return OpenAI(api_key=api_key)
 
 
 def _modelo() -> str:
-    return os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    return os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
+
+def _pdf_para_imagens_b64(pdf_bytes: bytes, dpi: int = 150) -> list[str]:
+    """Converte cada pagina do PDF em PNG base64 data URL pronto pra OpenAI Vision."""
+    imagens: list[str] = []
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        for page in doc:
+            pix = page.get_pixmap(dpi=dpi)
+            png_bytes = pix.tobytes("png")
+            b64 = base64.b64encode(png_bytes).decode("ascii")
+            imagens.append(f"data:image/png;base64,{b64}")
+    finally:
+        doc.close()
+    return imagens
 
 
 def _parse_json(texto: str) -> dict:
-    """Tenta extrair JSON do texto retornado pelo modelo (tolera markdown fences)."""
+    """Tolera ```json ... ``` fences que alguns modelos ainda devolvem."""
     t = texto.strip()
     if t.startswith("```"):
-        # remove fences ```json ... ```
         t = re.sub(r"^```(?:json)?\s*", "", t)
         t = re.sub(r"\s*```$", "", t)
     return json.loads(t)
@@ -97,34 +112,39 @@ def _parse_json(texto: str) -> dict:
 
 def _extrair(pdf_bytes: bytes, prompt: str) -> DadosTitulo:
     client = _client()
-    resp = client.models.generate_content(
+    imagens = _pdf_para_imagens_b64(pdf_bytes)
+
+    content: list[dict] = [{"type": "text", "text": prompt}]
+    for img_data_url in imagens:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": img_data_url, "detail": "high"},
+        })
+
+    resp = client.chat.completions.create(
         model=_modelo(),
-        contents=[
-            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
-            prompt,
-        ],
-        config=types.GenerateContentConfig(
-            temperature=0.0,
-            response_mime_type="application/json",
-        ),
+        messages=[{"role": "user", "content": content}],
+        response_format={"type": "json_object"},
+        temperature=0.0,
+        max_tokens=500,
     )
-    texto = (resp.text or "").strip()
+
+    texto = (resp.choices[0].message.content or "").strip()
     try:
         data = _parse_json(texto)
     except json.JSONDecodeError:
-        log.warning("Resposta Gemini nao-JSON: %s", texto[:200])
+        log.warning("Resposta OpenAI nao-JSON: %s", texto[:200])
         return DadosTitulo(linha_digitavel=None, raw=texto)
 
-    # Gemini as vezes envelopa o objeto em uma lista, mesmo pedindo objeto unico.
     if isinstance(data, list):
         if not data:
             return DadosTitulo(linha_digitavel=None, raw=texto)
         if len(data) > 1:
-            log.warning("Gemini retornou %d itens; usando o primeiro.", len(data))
+            log.warning("OpenAI retornou %d itens; usando o primeiro.", len(data))
         data = data[0]
 
     if not isinstance(data, dict):
-        log.warning("Resposta Gemini com tipo inesperado (%s): %s", type(data).__name__, texto[:200])
+        log.warning("Resposta OpenAI com tipo inesperado (%s): %s", type(data).__name__, texto[:200])
         return DadosTitulo(linha_digitavel=None, raw=texto)
 
     return DadosTitulo(

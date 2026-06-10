@@ -1,6 +1,6 @@
 # Conciliador de Boletos
 
-Site interno que recebe **1 PDF com vários comprovantes** + **N PDFs de boletos**, casa cada boleto com seu comprovante pela **linha digitável** (extração via API Gemini) e devolve um **ZIP** com 1 PDF por boleto (boleto + comprovante mesclados). O nome do arquivo de saída é exatamente o nome original do boleto.
+Site interno que recebe **1 PDF com vários comprovantes** + **N PDFs de boletos**, casa cada boleto com seu comprovante pela **linha digitável** (extração via API OpenAI / GPT-4o-mini) e devolve um **ZIP** com 1 PDF por boleto (boleto + comprovante mesclados). O nome do arquivo de saída é exatamente o nome original do boleto.
 
 - Tela de **preview** antes do download para conferir os matches.
 - Boletos sem comprovante vão para a pasta `sem_comprovante/` dentro do ZIP.
@@ -13,7 +13,7 @@ Site interno que recebe **1 PDF com vários comprovantes** + **N PDFs de boletos
 - Python 3.10+
 - Flask + Gunicorn
 - `pypdf` para split/merge de PDFs
-- API Gemini (Google) — `google-genai`
+- API OpenAI — `openai` (GPT-4o-mini por padrão) + `pymupdf` para converter PDF em imagem
 - Deploy em VM Linux do GCP (porta 9000)
 
 ---
@@ -31,8 +31,8 @@ source .venv/bin/activate         # Windows PowerShell: .\.venv\Scripts\Activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# edite .env e cole sua chave em GEMINI_API_KEY
-# pegue uma em https://aistudio.google.com/app/apikey
+# edite .env e cole sua chave em OPENAI_API_KEY
+# pegue uma em https://platform.openai.com/api-keys
 
 python app.py
 ```
@@ -84,7 +84,7 @@ python3 -m venv .venv
 
 # Configuracao
 cp .env.example .env
-nano .env   # cole GEMINI_API_KEY e gere um FLASK_SECRET_KEY aleatorio
+nano .env   # cole OPENAI_API_KEY e gere um FLASK_SECRET_KEY aleatorio
 
 # Diretorio de sessoes acessivel ao usuario do servico (ajuste se mudou)
 sudo mkdir -p /tmp/conciliador_sessions
@@ -129,7 +129,7 @@ conciliador_boleto/
 ├── app.py                      # Flask: rotas /, /processar, /preview, /download, /health
 ├── conciliador/
 │   ├── __init__.py
-│   ├── gemini_client.py        # chamadas ao Gemini para extrair linha digitavel
+│   ├── openai_client.py        # chamadas ao OpenAI (Vision) para extrair linha digitavel
 │   ├── pdf_utils.py            # split_por_pagina, merge_pdfs
 │   └── matcher.py              # conciliar() + montar_zip() + ResultadoConciliacao
 ├── templates/index.html        # tela unica: upload -> revisao -> download
@@ -148,7 +148,7 @@ conciliador_boleto/
 ## 4. Como funciona o matching
 
 1. O PDF de comprovantes é dividido por página (1 comprovante = 1 página).
-2. Cada página de comprovante e cada PDF de boleto são enviados ao **Gemini** com prompt pedindo a linha digitável em JSON.
+2. Cada página de comprovante e cada PDF de boleto são convertidos em PNG (PyMuPDF) e enviados ao **OpenAI Vision** com prompt pedindo a linha digitável em JSON.
 3. A linha digitável é normalizada (só dígitos) — 44/47/48 dígitos — e usada como **chave de match**.
 4. Cada boleto:
    - Se a chave bate com uma página de comprovante: o boleto + a página são mesclados num PDF com **o mesmo nome do boleto original**.
@@ -161,8 +161,8 @@ conciliador_boleto/
 
 | Variável | Default | Descrição |
 | --- | --- | --- |
-| `GEMINI_API_KEY` | _(obrigatória)_ | Chave da API Gemini |
-| `GEMINI_MODEL` | `gemini-2.0-flash` | Modelo usado para extração |
+| `OPENAI_API_KEY` | _(obrigatória)_ | Chave da API OpenAI |
+| `OPENAI_MODEL` | `gpt-4o-mini` | Modelo usado para extração (gpt-4o-mini = barato; gpt-4o = mais preciso) |
 | `PORT` | `9000` | Porta HTTP |
 | `SESSIONS_DIR` | `/tmp/conciliador_sessions` | Onde os PDFs intermediários ficam |
 | `SESSION_TTL_MINUTES` | `30` | Tempo até a sessão expirar e ser apagada |
@@ -173,5 +173,5 @@ conciliador_boleto/
 ## 6. Limites
 
 - Upload total limitado a **200 MB** (ajuste `MAX_CONTENT_LENGTH` em `app.py`).
-- Cada chamada ao Gemini gasta tokens; rodar em paralelo (até 6 threads) reduz tempo total.
+- Cada chamada ao OpenAI gasta tokens; rodar em paralelo (até 6 threads) reduz tempo total.
 - Boletos com layout muito atípico podem falhar na extração da linha digitável — caem em `sem_comprovante/`.
