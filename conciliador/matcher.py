@@ -122,10 +122,10 @@ def _similaridade_nomes(a: Optional[str], b: Optional[str]) -> float:
 
 
 def _processar_paralelo(items: list, func, max_workers: Optional[int] = None):
-    # Default conservador (2) para nao estourar TPM da OpenAI em contas Tier 1.
-    # Sobrescrivivel via env AI_MAX_WORKERS quando seu tier for maior.
+    # Com OPENAI_IMAGE_DETAIL=low cada chamada gasta ~300 tokens, entao 6 paralelas
+    # cabem em qualquer tier. Sobrescrivivel via env AI_MAX_WORKERS.
     if max_workers is None:
-        max_workers = int(os.environ.get("AI_MAX_WORKERS", "2"))
+        max_workers = int(os.environ.get("AI_MAX_WORKERS", "6"))
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         return list(ex.map(func, items))
 

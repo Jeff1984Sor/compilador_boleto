@@ -88,8 +88,12 @@ def _modelo() -> str:
     return os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 
-def _pdf_para_imagens_b64(pdf_bytes: bytes, dpi: int = 150) -> list[str]:
-    """Converte cada pagina do PDF em PNG base64 data URL pronto pra OpenAI Vision."""
+def _pdf_para_imagens_b64(pdf_bytes: bytes) -> list[str]:
+    """Converte cada pagina do PDF em PNG base64 data URL pronto pra OpenAI Vision.
+
+    DPI configuravel via env OPENAI_PDF_DPI (default 120).
+    """
+    dpi = int(os.environ.get("OPENAI_PDF_DPI", "120"))
     imagens: list[str] = []
     doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
@@ -101,6 +105,13 @@ def _pdf_para_imagens_b64(pdf_bytes: bytes, dpi: int = 150) -> list[str]:
     finally:
         doc.close()
     return imagens
+
+
+def _detail_imagem() -> str:
+    """Detail level enviado pro OpenAI Vision. 'low' = ~85 tokens por imagem;
+    'high' = ate ~25k tokens. Default 'low' pra caber no Tier 1 (200k TPM).
+    Override via env OPENAI_IMAGE_DETAIL=high se sua conta tem mais TPM."""
+    return os.environ.get("OPENAI_IMAGE_DETAIL", "low")
 
 
 def _parse_json(texto: str) -> dict:
@@ -116,11 +127,12 @@ def _extrair(pdf_bytes: bytes, prompt: str) -> DadosTitulo:
     client = _client()
     imagens = _pdf_para_imagens_b64(pdf_bytes)
 
+    detail = _detail_imagem()
     content: list[dict] = [{"type": "text", "text": prompt}]
     for img_data_url in imagens:
         content.append({
             "type": "image_url",
-            "image_url": {"url": img_data_url, "detail": "high"},
+            "image_url": {"url": img_data_url, "detail": detail},
         })
 
     resp = client.chat.completions.create(
