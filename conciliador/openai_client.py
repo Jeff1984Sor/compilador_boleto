@@ -79,7 +79,9 @@ def _client() -> OpenAI:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY nao definida no ambiente (.env)")
-    return OpenAI(api_key=api_key)
+    # max_retries: SDK reenfileira automaticamente em 429 (TPM) e 5xx,
+    # com backoff exponencial. Importante em contas Tier 1.
+    return OpenAI(api_key=api_key, max_retries=6, timeout=120.0)
 
 
 def _modelo() -> str:
