@@ -10,12 +10,15 @@ import base64
 import json
 import logging
 import os
+import random
 import re
+import threading
+import time
 from dataclasses import dataclass
 from typing import Optional
 
 import pymupdf
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +117,59 @@ def _detail_imagem() -> str:
     return os.environ.get("OPENAI_IMAGE_DETAIL", "low")
 
 
+# Lock global para serializar chamadas durante Tier 1 (workaround do TPM apertado).
+# Quando subir de tier, deixa OPENAI_SERIALIZE=0 no .env (ou remove a variavel).
+_LOCK_SERIALIZACAO = threading.Lock()
+
+
+def _deve_serializar() -> bool:
+    """Quando true, garante 1 chamada por vez (uso correto em Tier 1 OpenAI)."""
+    return os.environ.get("OPENAI_SERIALIZE", "1") != "0"
+
+
+def _max_retries_429() -> int:
+    return int(os.environ.get("OPENAI_MAX_429_RETRIES", "10"))
+
+
+def _chamar_com_backoff(client: OpenAI, **kwargs):
+    """Faz a call ao chat.completions com retry exponencial agressivo em 429.
+
+    O SDK ja faz 6 retries automaticos, mas com timeout curto. Aqui aumentamos
+    e respeitamos o header 'retry-after' do OpenAI quando ele indica espera.
+    """
+    max_tentativas = _max_retries_429()
+    for tentativa in range(max_tentativas):
+        try:
+            return client.chat.completions.create(**kwargs)
+        except RateLimitError as e:
+            # Tenta extrair "try again in Xs" da mensagem
+            espera = _parse_retry_after(e)
+            if espera is None:
+                # Backoff exponencial com jitter: 2, 4, 8, 16, 32, 64...
+                espera = min(60, 2 ** (tentativa + 1)) + random.uniform(0, 1)
+            if tentativa == max_tentativas - 1:
+                log.error("Esgotaram %d retries em 429. Desistindo.", max_tentativas)
+                raise
+            log.warning(
+                "429 (tentativa %d/%d). Aguardando %.1fs antes de retentar.",
+                tentativa + 1, max_tentativas, espera,
+            )
+            time.sleep(espera)
+
+
+_RETRY_AFTER_RE = re.compile(r"try again in ([\d.]+)(ms|s)", re.IGNORECASE)
+
+
+def _parse_retry_after(err: Exception) -> Optional[float]:
+    msg = str(err)
+    m = _RETRY_AFTER_RE.search(msg)
+    if not m:
+        return None
+    valor = float(m.group(1))
+    unidade = m.group(2).lower()
+    return valor / 1000.0 if unidade == "ms" else valor
+
+
 def _parse_json(texto: str) -> dict:
     """Tolera ```json ... ``` fences que alguns modelos ainda devolvem."""
     t = texto.strip()
@@ -135,13 +191,20 @@ def _extrair(pdf_bytes: bytes, prompt: str) -> DadosTitulo:
             "image_url": {"url": img_data_url, "detail": detail},
         })
 
-    resp = client.chat.completions.create(
+    # Em Tier 1 do OpenAI o TPM eh apertado: serializa as chamadas para evitar
+    # burst de tokens e usa backoff exponencial respeitando o retry-after.
+    kwargs = dict(
         model=_modelo(),
         messages=[{"role": "user", "content": content}],
         response_format={"type": "json_object"},
         temperature=0.0,
         max_tokens=500,
     )
+    if _deve_serializar():
+        with _LOCK_SERIALIZACAO:
+            resp = _chamar_com_backoff(client, **kwargs)
+    else:
+        resp = _chamar_com_backoff(client, **kwargs)
 
     texto = (resp.choices[0].message.content or "").strip()
     try:
