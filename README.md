@@ -162,7 +162,7 @@ conciliador_boleto/
 | Variável | Default | Descrição |
 | --- | --- | --- |
 | `GEMINI_API_KEY` | _(obrigatória)_ | Chave da API Gemini |
-| `GEMINI_MODEL` | `gemini-2.0-flash` | Modelo usado para extração |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Modelo usado para extração |
 | `PORT` | `9000` | Porta HTTP |
 | `SESSIONS_DIR` | `/tmp/conciliador_sessions` | Onde os PDFs intermediários ficam |
 | `SESSION_TTL_MINUTES` | `30` | Tempo até a sessão expirar e ser apagada |

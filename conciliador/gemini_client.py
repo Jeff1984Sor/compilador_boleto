@@ -81,7 +81,7 @@ def _client() -> genai.Client:
 
 
 def _modelo() -> str:
-    return os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    return os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 def _parse_json(texto: str) -> dict:
