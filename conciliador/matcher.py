@@ -19,7 +19,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional
 
-from . import gemini_client as ai_client
+from . import openai_client as ai_client
 from . import pdf_utils
 
 log = logging.getLogger(__name__)

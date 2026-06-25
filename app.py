@@ -33,7 +33,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB upload total
+app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-key-trocar-em-producao")
 
 SESSIONS_DIR = Path(os.environ.get("SESSIONS_DIR", "/tmp/conciliador_sessions"))
