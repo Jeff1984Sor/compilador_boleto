@@ -75,19 +75,32 @@ def texto_pdf(pdf_bytes: bytes) -> str:
         return ""
 
 
-# Sequencia de 44/47/48 digitos, possivelmente separada por espacos, pontos e hifens.
+# Boleto bancario (febraban): 47 digitos em 5 campos "5.5 5.6 5.6 1 14".
+# Aceita ponto OU espaco como separador. Casa tanto "23790.51317 62213..."
+# quanto "23790 51317 62213 ...". Importante: NAO engole prefixos como o
+# codigo do banco "237-2 " que aparece coladinho na frente em alguns boletos.
+_FEBRABAN_RE = re.compile(
+    r"\d{5}[.\s]?\d{5}[.\s]+\d{5}[.\s]?\d{6}[.\s]+\d{5}[.\s]?\d{6}[.\s]+\d[.\s]+\d{14}"
+)
+
+# Sequencia continua de 44/47/48 digitos (arrecadacao/DARE/tributos).
 # Ex.: "85860000000-4 73000185112-4 60590136345-5 37620260724-0" (DARE, 48 digitos)
-#      "23791 62825 50020 207945 35004 663403 1 14890000105378"   (boleto, 47 digitos)
 _LINHA_RE = re.compile(r"(?<!\d)(\d[\d.\s-]{42,60}\d)(?!\d)")
 
 
 def linha_digitavel(texto: str) -> str | None:
-    """Acha a primeira linha digitavel valida (44/47/48 digitos) no texto."""
+    """Acha a linha digitavel no texto. Devolve so os digitos (44/47/48)."""
+    # 1) Boleto bancario: leitor especifico, robusto contra o prefixo do banco.
+    for linha in texto.splitlines():
+        m = _FEBRABAN_RE.search(linha)
+        if m:
+            return re.sub(r"\D", "", m.group(0))
+    # 2) Generico: bloco continuo que normaliza para 44/47/48 (arrecadacao etc.)
     for linha in texto.splitlines():
         for m in _LINHA_RE.finditer(linha):
             digitos = re.sub(r"\D", "", m.group(1))
             if len(digitos) in (44, 47, 48):
-                return m.group(1).strip()
+                return digitos
     return None
 
 
