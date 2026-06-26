@@ -14,9 +14,56 @@ from __future__ import annotations
 import io
 import re
 
-from pypdf import PdfReader
+from pypdf import PdfReader, PdfWriter
 
 from .openai_client import DadosTitulo
+
+
+# Marcadores de que uma PAGINA e um comprovante de pagamento (e nao o boleto).
+# Usados para limpar boletos que vem com comprovantes ja grudados no arquivo.
+_MARCADORES_COMPROVANTE = (
+    "comprovante de pagamento",
+    "via contribuinte",
+    "autenticacao digital",
+    "autenticação digital",
+    "pagamento efetuado em",
+    "operacao efetuada em",
+    "operação efetuada em",
+)
+
+
+def _pagina_eh_comprovante(texto_pagina: str) -> bool:
+    t = (texto_pagina or "").lower()
+    return any(m in t for m in _MARCADORES_COMPROVANTE)
+
+
+def manter_pagina_boleto(pdf_bytes: bytes) -> bytes:
+    """Reduz um arquivo de BOLETO a uma unica pagina: a do boleto.
+
+    Muitos arquivos chegam com comprovantes (as vezes de outro titulo) grudados.
+    O resultado final deve ter so 2 paginas: boleto + comprovante certo. Aqui
+    mantemos apenas a 1a pagina que NAO parece comprovante (o boleto). Se nao
+    der para distinguir (sem texto), mantem a 1a pagina do arquivo.
+    """
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+    except Exception:
+        return pdf_bytes
+
+    if len(reader.pages) <= 1:
+        return pdf_bytes
+
+    idx_boleto = 0
+    for i, page in enumerate(reader.pages):
+        if not _pagina_eh_comprovante(page.extract_text() or ""):
+            idx_boleto = i
+            break
+
+    writer = PdfWriter()
+    writer.add_page(reader.pages[idx_boleto])
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
 
 
 def texto_pdf(pdf_bytes: bytes) -> str:

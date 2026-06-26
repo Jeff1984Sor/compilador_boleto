@@ -21,6 +21,7 @@ from typing import Optional
 
 from . import extrator as ai_client
 from . import pdf_utils
+from . import texto_utils
 
 log = logging.getLogger(__name__)
 
@@ -149,6 +150,11 @@ def conciliar(
     pasta_sem = sessao_dir / "sem_comprovante"
 
     log.info("Iniciando conciliacao: %d boletos", len(boletos))
+
+    # 0. Limpa boletos: muitos arquivos chegam com um comprovante (as vezes de
+    #    outro titulo) ja grudado. Mantem so a pagina do boleto, para que o
+    #    resultado final tenha exatamente 2 paginas: boleto + comprovante certo.
+    boletos = [(nome, texto_utils.manter_pagina_boleto(b)) for nome, b in boletos]
 
     # 1. Split de comprovantes
     paginas_comprovantes = pdf_utils.split_por_pagina(comprovantes_pdf)
