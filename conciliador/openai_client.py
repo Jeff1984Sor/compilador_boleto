@@ -20,6 +20,8 @@ from typing import Optional
 import pymupdf
 from openai import OpenAI, RateLimitError
 
+from .chave import canonica as _chave_canonica
+
 log = logging.getLogger(__name__)
 
 _LINHA_DIGITAVEL_RE = re.compile(r"\d")
@@ -36,13 +38,12 @@ class DadosTitulo:
 
     @property
     def chave(self) -> Optional[str]:
-        """Linha digitavel normalizada (so digitos) - usada como chave de match."""
-        if not self.linha_digitavel:
-            return None
-        digitos = "".join(_LINHA_DIGITAVEL_RE.findall(self.linha_digitavel))
-        if len(digitos) in (47, 48, 44):
-            return digitos
-        return digitos if digitos else None
+        """Codigo de barras canonico (44 dig) - usado como chave de match.
+
+        Normaliza linha digitavel (47/48) e codigo de barras (44) para a mesma
+        representacao, para casar boleto x comprovante mesmo em formatos diferentes.
+        """
+        return _chave_canonica(self.linha_digitavel)
 
 
 _PROMPT_BOLETO = """\

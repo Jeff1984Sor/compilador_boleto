@@ -80,10 +80,47 @@ def valor(texto: str, tipo: str) -> str | None:
     return None
 
 
+# Rotulos de onde tirar o nome do beneficiario/favorecido (ordem de prioridade).
+_LABELS_NOME = [
+    "nome do recebedor",
+    "beneficiario final",
+    "beneficiario",
+    "beneficiário",
+    "razao social",
+    "razão social",
+    "favorecido",
+    "cedente",
+    "nome / razao social",
+    "nome / razão social",
+]
+
+# Termos que NAO sao nome (quando o rotulo casa com o pagador/devedor, ignoramos).
+_RE_NOME = re.compile(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ .,&'/-]{3,}")
+
+
+def beneficiario(texto: str) -> str | None:
+    """Extrai o nome do beneficiario/favorecido a partir de rotulos conhecidos."""
+    low = texto.lower()
+    for lab in _LABELS_NOME:
+        idx = low.find(lab)
+        if idx == -1:
+            continue
+        # Pega o trecho logo apos o rotulo (e o ':' eventual) e isola o nome.
+        trecho = texto[idx + len(lab): idx + len(lab) + 80]
+        trecho = trecho.lstrip(" :\t")
+        m = _RE_NOME.match(trecho)
+        if m:
+            nome = m.group(0).strip(" .,-/")
+            if len(nome) >= 4:
+                return nome
+    return None
+
+
 def parse(texto: str, tipo: str) -> DadosTitulo:
     """Monta um DadosTitulo a partir do texto extraido."""
     return DadosTitulo(
         linha_digitavel=linha_digitavel(texto),
         valor=valor(texto, tipo),
+        beneficiario=beneficiario(texto),
         raw="texto",
     )
