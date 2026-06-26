@@ -158,6 +158,13 @@ def conciliar(
     dados_comprovantes = _processar_paralelo(paginas_comprovantes, ai_client.extrair_dados_comprovante)
     dados_boletos = _processar_paralelo([b[1] for b in boletos], ai_client.extrair_dados_boleto)
 
+    # Diagnostico: chave (codigo de barras canonico) e valor de cada documento.
+    for (nome, _), d in zip(boletos, dados_boletos):
+        log.info("BOLETO  %-45s chave=%s valor=%s", nome[:45], d.chave, d.valor)
+    for idx, d in enumerate(dados_comprovantes):
+        log.info("COMPROV pag.%-3d chave=%s valor=%s benef=%s",
+                 idx + 1, d.chave, d.valor, (d.beneficiario or "")[:30])
+
     # 3. Inicializa resultado
     resultado = ResultadoConciliacao(total_comprovantes=len(paginas_comprovantes))
     for (nome, _), dados in zip(boletos, dados_boletos):
@@ -210,6 +217,11 @@ def conciliar(
             if idx_pag in paginas_usadas:
                 continue
             dc = dados_comprovantes[idx_pag]
+            # Comprovante com codigo de barras so casa via Round 1 (mesma chave).
+            # Casar por valor um comprovante "com barras" a outro boleto produz
+            # pareamento errado quando ha varios valores iguais (ex.: DARE 73,00).
+            if dc.chave:
+                continue
             if _normalizar_valor(dc.valor) != valor_boleto:
                 continue
             sim = _similaridade_nomes(db.beneficiario, dc.beneficiario)
@@ -239,6 +251,7 @@ def conciliar(
         candidatos = [
             idx_pag for idx_pag in range(len(paginas_comprovantes))
             if idx_pag not in paginas_usadas
+            and dados_comprovantes[idx_pag].chave is None   # so comprovantes sem barras
             and _normalizar_valor(dados_comprovantes[idx_pag].valor) == valor_boleto
         ]
 
@@ -270,6 +283,8 @@ def conciliar(
     comprovantes_restantes_por_valor: dict[int, list[int]] = {}
     for idx_pag in range(len(paginas_comprovantes)):
         if idx_pag in paginas_usadas:
+            continue
+        if dados_comprovantes[idx_pag].chave:   # com barras nao entra em pareamento por valor
             continue
         v = _normalizar_valor(dados_comprovantes[idx_pag].valor)
         if v is not None:
